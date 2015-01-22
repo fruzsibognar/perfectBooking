@@ -1,0 +1,126 @@
+/*Identify booking types on order level*/
+
+
+
+SELECT *,
+  IF(accepted_date!=final_date AND final_status IN("completed", "accepted", "pending", "proposal_for_change", "invoiced"),1,0) as changed_by_customer,
+  IF(pending_date!=accepted_date AND final_status IN("completed", "accepted", "pending", "proposal_for_change", "invoiced"),1,0) as changed_by_salon,
+  IF(pending_date=accepted_date AND accepted_date=final_date AND final_status IN("completed", "accepted", "pending", "proposal_for_change", "invoiced"),1,0) as perfect_booking,
+  IF(final_status IN("completed", "accepted", "pending", "proposal_for_change", "invoiced"),1,0) as good_bookings,
+  IF(final_status IN ("rejected_closed", "rejected", "noshow", "cancelled"),1,0) as lost_bookings,
+  IF(final_status IN("cancelled", "noshow"),1, 0) as lost_to_customer, 
+  IF(final_status IN("rejected", "rejected_closed"),1, 0) as lost_to_salon
+  FROM (
+  
+SELECT ol.id, 
+  ol.salon_id,
+  s.name,
+  city,
+  country,
+  b.feature as salon_booster,
+  g.feature as google_calendar,
+  n.feature as supersize_noreject,
+  MIN(ol.created_at) as created_at,
+  MIN(pending_book_date) as pending_date,
+  MIN(accepted_book_date) as accepted_date,
+  MIN(final_book_date) as final_date,
+  final_status,
+  pb.affiliate_id
+
+  FROM orders_log as ol
+  
+  JOIN
+  (SELECT id,
+  salons.name
+  FROM salons ) as s
+  ON s.id=ol.salon_id
+  
+  
+  JOIN 
+  (SELECT id,
+  street, housenumber, city, country 
+  FROM addresses) as a
+  
+  ON a.id=s.id
+  
+  LEFT JOIN (SELECT 
+    salon_id,
+    feature 
+    FROM salon_beta_features
+    WHERE feature="google_calendar") g
+    ON s.id=g.salon_id
+    
+LEFT JOIN (SELECT 
+    salon_id,
+    feature 
+    FROM salon_beta_features
+    WHERE feature="salon_booster") b
+    ON s.id=b.salon_id
+    
+ LEFT JOIN (SELECT 
+    salon_id,
+    feature 
+    FROM salon_beta_features
+    WHERE feature="super_size_no_reject") n
+    ON s.id=n.salon_id
+
+  ###join the orders and create next_log / next_status etc.
+  JOIN(
+  SELECT 
+  o.salon_id,
+  o.id,
+  o.affiliate_id,
+  ol.log_id,
+  next_log_id,
+  rank,
+  next_rank,
+  next_created_at,
+  ol.created_at,
+  ol.status,
+  next_status,
+  ol.book_date,
+  next_book_date,
+  IF(ol.status="pending", ol.book_date, NULL) as pending_book_date,
+  IF(next_status="accepted", next_book_date, NULL) as accepted_book_date,
+  IF(rank IS NOT NULL AND next_rank IS NULL, ol.book_date, NULL) as final_book_date,
+  o.status as final_status
+  
+  
+FROM orders as o
+
+JOIN 
+  (SELECT # joining the ranks
+      ol.id,
+      ol.log_id,
+      ol.created_at,
+      ol.status,
+      ol.book_date,
+      @l_id:=CASE WHEN @o_id <> ol.id THEN 1 ELSE @l_id+1 END AS rank,
+      @o_id:=ol.id AS last_order_id
+  
+  FROM ((SELECT @l_id:=0) r,
+        (SELECT @o_id:=NULL) l,
+          (SELECT * FROM orders_log
+          WHERE  orders_log.status !="started" AND orders_log.paymentstatus = "authorised" AND orders_log.salon_id != "173" AND orders_log.order_type != "backend"
+          GROUP BY id, book_date, status ORDER BY id, log_id, created_at) ol)) ol
+    ON ol.id=o.id
+     
+LEFT JOIN  (SELECT
+      ol.id as next_id,
+        ol.log_id as next_log_id,
+        ol.created_at as next_created_at,
+        ol.status as next_status,
+        ol.book_date as next_book_date,
+        @l_id:=CASE WHEN @o_id <> ol.id THEN 1 ELSE @l_id+1 END AS next_rank,
+        @o_id:=ol.id 
+        FROM ((SELECT @l_id:=0) r,
+              (SELECT @o_id:=NULL) l,
+                (SELECT * FROM orders_log 
+                WHERE  orders_log.status !="started" AND orders_log.paymentstatus = "authorised" AND orders_log.salon_id != "173" AND orders_log.order_type != "backend"
+                GROUP BY id, book_date, status ORDER BY id, log_id, created_at) ol)) next_state
+              
+ON ol.id=next_state.next_id AND rank+1=next_rank
+ORDER BY o.id, ol.log_id) pb
+  ON pb.log_id=ol.log_id
+  WHERE final_status NOT IN ("deleted", "started")
+  GROUP by ol.id, ol.salon_id, final_status, pb.affiliate_id) f_all
